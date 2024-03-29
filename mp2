@@ -111,7 +111,7 @@ void matrixMulGPU(float* h_P, const float* h_M, const float* h_N, int Width, int
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 
-    printf("MatrixMulKernel with TILE_WIDTH = %d executed in %f milliseconds.\n", tileSize, milliseconds);
+    printf("MatrixMulKernel with TILE_WIDTH = %d executed in %f ms.\n", tileSize, milliseconds);
 
     cudaMemcpy(h_P, d_P, size, cudaMemcpyDeviceToHost);
 
