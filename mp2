@@ -4,14 +4,12 @@
 #include <iostream>
 #include <cmath>
 #include <cstdlib>
-
-#define TILE_WIDTH 16 // This can be changed to 2, 5, 10, 25 as required
-
-__global__ void MatrixMulKernel(float* P, float* M, float* N, int Width) {
+template <int TILE_WIDTH>
+__global__ void MatrixMulKernel(float* P, const float* M, const float* N, int Width) {
     __shared__ float Ms[TILE_WIDTH][TILE_WIDTH];
     __shared__ float Ns[TILE_WIDTH][TILE_WIDTH];
 
-    int bx = blockIdx.x;  int by = blockIdx.y;
+    int bx = blockIdx.x; int by = blockIdx.y;
     int tx = threadIdx.x; int ty = threadIdx.y;
 
     // Identify the row and column of the P element to work on
@@ -19,106 +17,126 @@ __global__ void MatrixMulKernel(float* P, float* M, float* N, int Width) {
     int Col = bx * TILE_WIDTH + tx;
 
     float Pvalue = 0;
+
     // Loop over the M and N tiles required to compute the P element
-    for (int m = 0; m < (Width - 1) / TILE_WIDTH + 1; ++m) {
-        // Collaborative loading of M and N tiles into shared memory
-        if (Row < Width && m * TILE_WIDTH + tx < Width)
-            Ms[ty][tx] = M[Row * Width + m * TILE_WIDTH + tx];
-        else
-            Ms[ty][tx] = 0.0;
+    for (int m = 0; m < (Width / TILE_WIDTH); ++m) {
+        // Load the matrices from device memory to shared memory; each thread loads one element of each matrix
+        Ms[ty][tx] = M[Row * Width + (m * TILE_WIDTH + tx)];
+        Ns[ty][tx] = N[(m * TILE_WIDTH + ty) * Width + Col];
 
-        if (Col < Width && m * TILE_WIDTH + ty < Width)
-            Ns[ty][tx] = N[(m * TILE_WIDTH + ty) * Width + Col];
-        else
-            Ns[ty][tx] = 0.0;
-
+        // Synchronize to make sure the matrices are loaded
         __syncthreads();
 
-        for (int k = 0; k < TILE_WIDTH; ++k)
+        // Multiply the two matrices together;
+        for (int k = 0; k < TILE_WIDTH; ++k) {
             Pvalue += Ms[ty][k] * Ns[k][tx];
+        }
 
+        // Synchronize to make sure that the preceding computation is done before loading two new sub-matrices of M and N in the next iteration
         __syncthreads();
     }
-    if (Row < Width && Col < Width)
-        P[Row * Width + Col] = Pvalue;
+
+    // Write the matrix to device memory; each thread writes one element
+    P[Row * Width + Col] = Pvalue;
 }
 
 
-void initializeMatrix(float* mat, int size) {
-    for (int i = 0; i < size; i++) {
-        mat[i] = rand() / (float)RAND_MAX;
-    }
-}
-
-void matrixMultiplicationCPU(float* A, float* B, float* C, int N) {
-    for (int row = 0; row < N; row++) {
-        for (int col = 0; col < N; col++) {
-            float sum = 0.0f;
-            for (int n = 0; n < N; n++) {
-                sum += A[row * N + n] * B[n * N + col];
-            }
-            C[row * N + col] = sum;
-        }
-    }
-}
-
-bool checkResult(float* hostRef, float* gpuRef, int N, float tol = 1e-5) {
+// Host helper function to compare the GPU and CPU results
+bool verifyResult(float* cpuResult, float* gpuResult, int N) {
+    const float epsilon = 1e-5;
     for (int i = 0; i < N * N; i++) {
-        if (fabs(hostRef[i] - gpuRef[i]) > tol) {
+        if (fabs(cpuResult[i] - gpuResult[i]) > epsilon) {
             return false;
         }
     }
     return true;
 }
 
-int main() {
-    int N = 1024; // Matrix size, can be varied
-    size_t bytes = N * N * sizeof(float);
+// Simple CPU matrix multiplication for verification
+void matrixMulCPU(float* C, const float* A, const float* B, int width) {
+    for (int row = 0; row < width; row++) {
+        for (int col = 0; col < width; col++) {
+            float sum = 0;
+            for (int n = 0; n < width; n++) {
+                sum += A[row * width + n] * B[n * width + col];
+            }
+            C[row * width + col] = sum;
+        }
+    }
+}
 
-    float* h_M, * h_N, * h_P, * h_P_ref;
+void matrixMulGPU(float* h_P, const float* h_M, const float* h_N, int Width, int tileSize) {
     float* d_M, * d_N, * d_P;
 
-    h_M = (float*)malloc(bytes);
-    h_N = (float*)malloc(bytes);
-    h_P = (float*)malloc(bytes);
-    h_P_ref = (float*)malloc(bytes);
+    size_t size = Width * Width * sizeof(float);
+    cudaMalloc(&d_M, size);
+    cudaMalloc(&d_N, size);
+    cudaMalloc(&d_P, size);
 
-    initializeMatrix(h_M, N * N);
-    initializeMatrix(h_N, N * N);
+    cudaMemcpy(d_M, h_M, size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_N, h_N, size, cudaMemcpyHostToDevice);
 
-    cudaMalloc(&d_M, bytes);
-    cudaMalloc(&d_N, bytes);
-    cudaMalloc(&d_P, bytes);
-
-    cudaMemcpy(d_M, h_M, bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_N, h_N, bytes, cudaMemcpyHostToDevice);
-
-    dim3 block(TILE_WIDTH, TILE_WIDTH);
-    dim3 grid((N + block.x - 1) / block.x, (N + block.y - 1) / block.y);
-
-    MatrixMulKernel << <grid, block >> > (d_P, d_M, d_N, N);
-
-    cudaMemcpy(h_P, d_P, bytes, cudaMemcpyDeviceToHost);
-
-    // Compute on CPU for comparison
-    matrixMultiplicationCPU(h_M, h_N, h_P_ref, N);
-
-    // Check results
-    if (checkResult(h_P_ref, h_P, N)) {
-        printf("Test PASSED\n");
-    }
-    else {
-        printf("Test FAILED\n");
+    dim3 dimBlock(tileSize, tileSize);
+    dim3 dimGrid((Width + tileSize - 1) / tileSize, (Width + tileSize - 1) / tileSize);
+    switch (tileSize) {
+    case 2:
+        MatrixMulKernel<2> << <dimGrid, dimBlock >> > (d_P, d_M, d_N, Width);
+        break;
+    case 5:
+        MatrixMulKernel<5> << <dimGrid, dimBlock >> > (d_P, d_M, d_N, Width);
+        break;
+    case 10:
+        MatrixMulKernel<10> << <dimGrid, dimBlock >> > (d_P, d_M, d_N, Width);
+        break;
+    case 25:
+        MatrixMulKernel<25> << <dimGrid, dimBlock >> > (d_P, d_M, d_N, Width);
+        break;
+    default:
+        printf("Unsupported TILE_WIDTH\n");
     }
 
-    // Free memory
+    cudaMemcpy(h_P, d_P, size, cudaMemcpyDeviceToHost);
+
     cudaFree(d_M);
     cudaFree(d_N);
     cudaFree(d_P);
+}
+
+int main() {
+    const int Width = 100; // Example: 100x100 matrix; repeat for 250, 500, 1000, 1500
+    const int TILE_WIDTHS[] = { 2, 5, 10, 25 };
+
+    float* h_M = (float*)malloc(Width * Width * sizeof(float));
+    float* h_N = (float*)malloc(Width * Width * sizeof(float));
+    float* h_P = (float*)malloc(Width * Width * sizeof(float)); // GPU result
+    float* h_P_cpu = (float*)malloc(Width * Width * sizeof(float)); // CPU result for verification
+
+    // Initialize matrices M and N with random values
+    for (int i = 0; i < Width * Width; i++) {
+        h_M[i] = rand() / (float)RAND_MAX;
+        h_N[i] = rand() / (float)RAND_MAX;
+    }
+
+    // Perform CPU matrix multiplication for verification
+    matrixMulCPU(h_P_cpu, h_M, h_N, Width);
+
+    for (int i = 0; i < sizeof(TILE_WIDTHS) / sizeof(TILE_WIDTHS[0]); i++) {
+        int tileSize = TILE_WIDTHS[i];
+        printf("Running kernel with TILE_WIDTH = %d\n", tileSize);
+        matrixMulGPU(h_P, h_M, h_N, Width, tileSize);
+
+        if (verifyResult(h_P_cpu, h_P, Width)) {
+            printf("Test PASSED\n");
+        }
+        else {
+            printf("Test FAILED\n");
+        }
+    }
+
     free(h_M);
     free(h_N);
     free(h_P);
-    free(h_P_ref);
+    free(h_P_cpu);
 
     return 0;
 }
