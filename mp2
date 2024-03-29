@@ -49,45 +49,6 @@ bool checkResults(float* cpuRes, float* gpuRes, int size) {
     return true;
 }
 
-void gpuMatrixMul(float* gpuProduct, const float* mat1, const float* mat2, int dim, int tileSize) {
-    float* dMat1, * dMat2, * dProd;
-    size_t bytes = dim * dim * sizeof(float);
-
-    cudaMalloc(&dMat1, bytes);
-    cudaMalloc(&dMat2, bytes);
-    cudaMalloc(&dProd, bytes);
-
-    cudaMemcpy(dMat1, mat1, bytes, cudaMemcpyHostToDevice);
-    cudaMemcpy(dMat2, mat2, bytes, cudaMemcpyHostToDevice);
-
-    dim3 block(tileSize, tileSize);
-    dim3 grid((dim + tileSize - 1) / tileSize, (dim + tileSize - 1) / tileSize);
-
-    // Template switch-case is not directly feasible in CUDA. Using if-else conditions as a workaround for an example.
-    if (tileSize == 2) {
-        tileMatrixMult<2> << <grid, block >> > (dProd, dMat1, dMat2, dim);
-    }
-    else if (tileSize == 5) {
-        tileMatrixMult<5> << <grid, block >> > (dProd, dMat1, dMat2, dim);
-    }
-    else if (tileSize == 10) {
-        tileMatrixMult<10> << <grid, block >> > (dProd, dMat1, dMat2, dim);
-    }
-    else if (tileSize == 25) {
-        tileMatrixMult<25> << <grid, block >> > (dProd, dMat1, dMat2, dim);
-    }
-    else {
-        printf("Unsupported TILE_WIDTH\n");
-        return;
-    }
-
-    cudaMemcpy(gpuProduct, dProd, bytes, cudaMemcpyDeviceToHost);
-
-    cudaFree(dMat1);
-    cudaFree(dMat2);
-    cudaFree(dProd);
-}
-
 int main() {
     int dim = 100; // Example dimension
     size_t bytes = dim * dim * sizeof(float);
@@ -104,6 +65,17 @@ int main() {
 
     for (int i = 0; i < NUM_DIMS; ++i) {
         int tileSize = DIMS[i];
+        float* dMat1, * dMat2, * dProd;
+        cudaMalloc(&dMat1, bytes);
+        cudaMalloc(&dMat2, bytes);
+        cudaMalloc(&dProd, bytes);
+
+        cudaMemcpy(dMat1, mat1, bytes, cudaMemcpyHostToDevice);
+        cudaMemcpy(dMat2, mat2, bytes, cudaMemcpyHostToDevice);
+
+        dim3 block(tileSize, tileSize);
+        dim3 grid((dim + tileSize - 1) / tileSize, (dim + tileSize - 1) / tileSize);
+
         cudaEvent_t start, stop;
         float milliseconds = 0;
 
@@ -111,11 +83,29 @@ int main() {
         cudaEventCreate(&stop);
         cudaEventRecord(start, 0);
 
-        tileMatrixMult(gpuProd, mat1, mat2, dim, tileSize);
+        // Direct kernel launch with template
+        switch (tileSize) {
+        case 2:
+            tileMatrixMult<2> << <grid, block >> > (dProd, dMat1, dMat2, dim);
+            break;
+        case 5:
+            tileMatrixMult<5> << <grid, block >> > (dProd, dMat1, dMat2, dim);
+            break;
+        case 10:
+            tileMatrixMult<10> << <grid, block >> > (dProd, dMat1, dMat2, dim);
+            break;
+        case 25:
+            tileMatrixMult<25> << <grid, block >> > (dProd, dMat1, dMat2, dim);
+            break;
+        default:
+            printf("Unsupported TILE_WIDTH\n");
+        }
 
         cudaEventRecord(stop, 0);
         cudaEventSynchronize(stop);
         cudaEventElapsedTime(&milliseconds, start, stop);
+
+        cudaMemcpy(gpuProd, dProd, bytes, cudaMemcpyDeviceToHost);
 
         cpuMatrixMul(cpuProd, mat1, mat2, dim);
 
@@ -125,6 +115,10 @@ int main() {
         else {
             std::cout << "TILE_WIDTH = " << tileSize << ": Test FAILED" << std::endl;
         }
+
+        cudaFree(dMat1);
+        cudaFree(dMat2);
+        cudaFree(dProd);
     }
 
     free(mat1);
