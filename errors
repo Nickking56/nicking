@@ -1,2 +1,5 @@
-Severity	Code	Description	Project	File	Line	Suppression State
+
 Error	MSB3721	The command ""C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\bin\nvcc.exe" -gencode=arch=compute_52,code=\"sm_52,compute_52\" --use-local-env -ccbin "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.36.32532\bin\HostX64\x64" -x cu   -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\include" -I"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.2\include"  -G   --keep-dir x64\Debug  -maxrregcount=0   --machine 64 --compile -cudart static  -g  -DWIN32 -DWIN64 -D_DEBUG -D_CONSOLE -D_MBCS -Xcompiler "/EHsc /W3 /nologo /Od /FS /Zi /RTC1 /MDd " -Xcompiler "/Fdx64\Debug\vc143.pdb" -o C:\Users\20njak\source\repos\MP2\MP2\x64\Debug\kernel.cu.obj "C:\Users\20njak\source\repos\MP2\MP2\kernel.cu"" exited with code 2.	MP2	C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\BuildCustomizations\CUDA 12.2.targets	799	
+
+
+Error		no instance of function template "tileMatrixMultAdaptive" matches the argument list	MP2	C:\Users\20njak\source\repos\MP2\MP2\kernel.cu	128	
