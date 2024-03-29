@@ -1,160 +1,136 @@
 #include <cuda_runtime.h>
-#include <stdio.h>
 #include "device_launch_parameters.h"
-#include <iostream>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctime>
 #include <cmath>
-#include <cstdlib>
+#include <iostream>
+
+const int DIMS[] = { 2, 5, 10, 25 };
+const int NUM_DIMS = sizeof(DIMS) / sizeof(int);
+
+// CUDA kernel for matrix multiplication adapted to different TILE_WIDTH
 template <int TILE_WIDTH>
-__global__ void MatrixMulKernel(float* P, const float* M, const float* N, int Width) {
-    __shared__ float Ms[TILE_WIDTH][TILE_WIDTH];
-    __shared__ float Ns[TILE_WIDTH][TILE_WIDTH];
+__global__ void tileMatrixMult(float* resultMat, const float* matA, const float* matB, int dimension) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    int bx = blockIdx.x; int by = blockIdx.y;
-    int tx = threadIdx.x; int ty = threadIdx.y;
-
-    // Identify the row and column of the P element to work on
-    int Row = by * TILE_WIDTH + ty;
-    int Col = bx * TILE_WIDTH + tx;
-
-    float Pvalue = 0;
-
-    // Loop over the M and N tiles required to compute the P element
-    for (int m = 0; m < (Width / TILE_WIDTH); ++m) {
-        // Load the matrices from device memory to shared memory; each thread loads one element of each matrix
-        Ms[ty][tx] = M[Row * Width + (m * TILE_WIDTH + tx)];
-        Ns[ty][tx] = N[(m * TILE_WIDTH + ty) * Width + Col];
-
-        // Synchronize to make sure the matrices are loaded
-        __syncthreads();
-
-        // Multiply the two matrices together;
-        for (int k = 0; k < TILE_WIDTH; ++k) {
-            Pvalue += Ms[ty][k] * Ns[k][tx];
+    if (row < dimension && col < dimension) {
+        float val = 0;
+        for (int e = 0; e < dimension; ++e) {
+            val += matA[row * dimension + e] * matB[e * dimension + col];
         }
-
-        // Synchronize to make sure that the preceding computation is done before loading two new sub-matrices of M and N in the next iteration
-        __syncthreads();
+        resultMat[row * dimension + col] = val;
     }
-
-    // Write the matrix to device memory; each thread writes one element
-    P[Row * Width + Col] = Pvalue;
 }
 
+// Function to multiply matrices on the CPU for verification
+void cpuMatrixMul(float* product, const float* matX, const float* matY, int size) {
+    for (int i = 0; i < size; ++i) {
+        for (int j = 0; j < size; ++j) {
+            float sum = 0;
+            for (int k = 0; k < size; ++k) {
+                sum += matX[i * size + k] * matY[k * size + j];
+            }
+            product[i * size + j] = sum;
+        }
+    }
+}
 
-// Host helper function to compare the GPU and CPU results
-bool verifyResult(float* cpuResult, float* gpuResult, int N) {
-    const float epsilon = 1e-5;
-    for (int i = 0; i < N * N; i++) {
-        if (fabs(cpuResult[i] - gpuResult[i]) > epsilon) {
+// Function to compare the GPU and CPU results
+bool checkResults(float* cpuRes, float* gpuRes, int size) {
+    const float eps = 1e-5;
+    for (int i = 0; i < size * size; i++) {
+        if (fabs(cpuRes[i] - gpuRes[i]) > eps) {
             return false;
         }
     }
     return true;
 }
 
-// Simple CPU matrix multiplication for verification
-void matrixMulCPU(float* C, const float* A, const float* B, int width) {
-    for (int row = 0; row < width; row++) {
-        for (int col = 0; col < width; col++) {
-            float sum = 0;
-            for (int n = 0; n < width; n++) {
-                sum += A[row * width + n] * B[n * width + col];
-            }
-            C[row * width + col] = sum;
-        }
+void gpuMatrixMul(float* gpuProduct, const float* mat1, const float* mat2, int dim, int tileSize) {
+    float* dMat1, * dMat2, * dProd;
+    size_t bytes = dim * dim * sizeof(float);
+
+    cudaMalloc(&dMat1, bytes);
+    cudaMalloc(&dMat2, bytes);
+    cudaMalloc(&dProd, bytes);
+
+    cudaMemcpy(dMat1, mat1, bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(dMat2, mat2, bytes, cudaMemcpyHostToDevice);
+
+    dim3 block(tileSize, tileSize);
+    dim3 grid((dim + tileSize - 1) / tileSize, (dim + tileSize - 1) / tileSize);
+
+    // Template switch-case is not directly feasible in CUDA. Using if-else conditions as a workaround for an example.
+    if (tileSize == 2) {
+        tileMatrixMult<2> << <grid, block >> > (dProd, dMat1, dMat2, dim);
     }
-}
-void matrixMulGPU(float* h_P, const float* h_M, const float* h_N, int Width, int tileSize) {
-    float* d_M, * d_N, * d_P;
-
-    size_t size = Width * Width * sizeof(float);
-    cudaMalloc(&d_M, size);
-    cudaMalloc(&d_N, size);
-    cudaMalloc(&d_P, size);
-
-    cudaMemcpy(d_M, h_M, size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_N, h_N, size, cudaMemcpyHostToDevice);
-
-    dim3 dimBlock(tileSize, tileSize);
-    dim3 dimGrid((Width + tileSize - 1) / tileSize, (Width + tileSize - 1) / tileSize);
-
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    float milliseconds = 0;
-    cudaEventRecord(start);
-
-    // Kernel launch with timing
-    switch (tileSize) {
-    case 2:
-        MatrixMulKernel<2> << <dimGrid, dimBlock >> > (d_P, d_M, d_N, Width);
-        break;
-    case 5:
-        MatrixMulKernel<5> << <dimGrid, dimBlock >> > (d_P, d_M, d_N, Width);
-        break;
-    case 10:
-        MatrixMulKernel<10> << <dimGrid, dimBlock >> > (d_P, d_M, d_N, Width);
-        break;
-    case 25:
-        MatrixMulKernel<25> << <dimGrid, dimBlock >> > (d_P, d_M, d_N, Width);
-        break;
-    default:
+    else if (tileSize == 5) {
+        tileMatrixMult<5> << <grid, block >> > (dProd, dMat1, dMat2, dim);
+    }
+    else if (tileSize == 10) {
+        tileMatrixMult<10> << <grid, block >> > (dProd, dMat1, dMat2, dim);
+    }
+    else if (tileSize == 25) {
+        tileMatrixMult<25> << <grid, block >> > (dProd, dMat1, dMat2, dim);
+    }
+    else {
         printf("Unsupported TILE_WIDTH\n");
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
         return;
     }
 
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    cudaEventElapsedTime(&milliseconds, start, stop);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
+    cudaMemcpy(gpuProduct, dProd, bytes, cudaMemcpyDeviceToHost);
 
-    printf("MatrixMulKernel with TILE_WIDTH = %d executed in %f ms.\n", tileSize, milliseconds);
-
-    cudaMemcpy(h_P, d_P, size, cudaMemcpyDeviceToHost);
-
-    cudaFree(d_M);
-    cudaFree(d_N);
-    cudaFree(d_P);
+    cudaFree(dMat1);
+    cudaFree(dMat2);
+    cudaFree(dProd);
 }
 
 int main() {
-    const int Width = 100; // Example: 100x100 matrix; repeat for 250, 500, 1000, 1500
-    const int TILE_WIDTHS[] = { 2, 5, 10, 25 };
+    int dim = 100; // Example dimension
+    size_t bytes = dim * dim * sizeof(float);
 
-    float* h_M = (float*)malloc(Width * Width * sizeof(float));
-    float* h_N = (float*)malloc(Width * Width * sizeof(float));
-    float* h_P = (float*)malloc(Width * Width * sizeof(float)); // GPU result
-    float* h_P_cpu = (float*)malloc(Width * Width * sizeof(float)); // CPU result for verification
+    float* mat1 = (float*)malloc(bytes), * mat2 = (float*)malloc(bytes);
+    float* cpuProd = (float*)malloc(bytes), * gpuProd = (float*)malloc(bytes);
 
-    // Initialize matrices M and N with random values
-    for (int i = 0; i < Width * Width; i++) {
-        h_M[i] = rand() / (float)RAND_MAX;
-        h_N[i] = rand() / (float)RAND_MAX;
+    // Initialize matrices with random values
+    srand(static_cast<unsigned>(time(nullptr)));
+    for (int i = 0; i < dim * dim; ++i) {
+        mat1[i] = static_cast<float>(rand()) / RAND_MAX;
+        mat2[i] = static_cast<float>(rand()) / RAND_MAX;
     }
 
-    // Perform CPU matrix multiplication for verification
-    matrixMulCPU(h_P_cpu, h_M, h_N, Width);
+    for (int i = 0; i < NUM_DIMS; ++i) {
+        int tileSize = DIMS[i];
+        cudaEvent_t start, stop;
+        float milliseconds = 0;
 
-    for (int i = 0; i < sizeof(TILE_WIDTHS) / sizeof(TILE_WIDTHS[0]); i++) {
-        int tileSize = TILE_WIDTHS[i];
-        printf("Running kernel with TILE_WIDTH = %d\n", tileSize);
-        matrixMulGPU(h_P, h_M, h_N, Width, tileSize);
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+        cudaEventRecord(start, 0);
 
-        if (verifyResult(h_P_cpu, h_P, Width)) {
-            printf("Test PASSED\n");
+        tileMatrixMult(gpuProd, mat1, mat2, dim, tileSize);
+
+        cudaEventRecord(stop, 0);
+        cudaEventSynchronize(stop);
+        cudaEventElapsedTime(&milliseconds, start, stop);
+
+        cpuMatrixMul(cpuProd, mat1, mat2, dim);
+
+        if (checkResults(cpuProd, gpuProd, dim)) {
+            std::cout << "TILE_WIDTH = " << tileSize << ": Test PASSED, GPU execution time: " << milliseconds << " ms" << std::endl;
         }
         else {
-            printf("Test FAILED\n");
+            std::cout << "TILE_WIDTH = " << tileSize << ": Test FAILED" << std::endl;
         }
     }
 
-    free(h_M);
-    free(h_N);
-    free(h_P);
-    free(h_P_cpu);
+    free(mat1);
+    free(mat2);
+    free(cpuProd);
+    free(gpuProd);
 
     return 0;
 }
