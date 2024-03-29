@@ -1,0 +1,148 @@
+#include <cuda_runtime.h>
+#include "device_launch_parameters.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctime>
+#include <cmath>
+#include <iostream>
+
+const int DIMS[] = { 2, 5, 10, 25 };
+const int NUM_DIMS = sizeof(DIMS) / sizeof(int);
+
+// CUDA kernel for matrix multiplication adapted to different TILE_WIDTH
+template <int TILE_WIDTH>
+__global__ void tileMatrixMultAdaptive(float* C, const float* A, const float* B, int A_rows, int A_cols, int B_cols) {
+    const int TILE_WIDTH_X = 16;
+    const int TILE_WIDTH_Y = 9;
+    __shared__ float sharedA[TILE_WIDTH_Y][TILE_WIDTH_X];
+    __shared__ float sharedB[TILE_WIDTH_X][TILE_WIDTH_X];
+
+    int bx = blockIdx.x, by = blockIdx.y;
+    int tx = threadIdx.x, ty = threadIdx.y;
+
+    int row = by * blockDim.y + ty;
+    int col = bx * blockDim.x + tx;
+    float sum = 0.0;
+
+    for (int m = 0; m < (A_cols + TILE_WIDTH_X - 1) / TILE_WIDTH_X; ++m) {
+        if (row < A_rows && (m * TILE_WIDTH_X + tx) < A_cols) {
+            sharedA[ty][tx] = A[row * A_cols + m * TILE_WIDTH_X + tx];
+        }
+        else {
+            sharedA[ty][tx] = 0.0;
+        }
+
+        if (col < B_cols && (m * TILE_WIDTH_X + ty) < A_cols) {
+            sharedB[ty][tx] = B[(m * TILE_WIDTH_X + ty) * B_cols + col];
+        }
+        else {
+            sharedB[ty][tx] = 0.0;
+        }
+
+        __syncthreads();
+
+        for (int k = 0; k < TILE_WIDTH_X; ++k) {
+            sum += sharedA[ty][k] * sharedB[k][tx];
+        }
+
+        __syncthreads();
+    }
+
+    if (row < A_rows && col < B_cols) {
+        C[row * B_cols + col] = sum;
+    }
+}
+
+
+// Function to multiply matrices on the CPU for verification
+void cpuMatrixMul(float* product, const float* matX, const float* matY, int size) {
+    for (int i = 0; i < size; ++i) {
+        for (int j = 0; j < size; ++j) {
+            float sum = 0;
+            for (int k = 0; k < size; ++k) {
+                sum += matX[i * size + k] * matY[k * size + j];
+            }
+            product[i * size + j] = sum;
+        }
+    }
+}
+
+// Function to compare the GPU and CPU results
+bool checkResults(float* cpuRes, float* gpuRes, int size) {
+    const float eps = 1e-5;
+    for (int i = 0; i < size * size; i++) {
+        if (fabs(cpuRes[i] - gpuRes[i]) > eps) {
+            return false;
+        }
+    }
+    return true;
+}
+
+
+int main() {
+    // Example dimensions for the two experiments
+    int experiments[2][3] = {
+        {400, 450, 500}, // M: 400x450, N: 450x500
+        {1200, 1350, 1150} // M: 1200x1350, N: 1350x1150
+    };
+
+    for (int exp = 0; exp < 2; ++exp) {
+        int A_rows = experiments[exp][0];
+        int A_cols = experiments[exp][1];
+        int B_cols = experiments[exp][2];
+        size_t A_size = A_rows * A_cols * sizeof(float);
+        size_t B_size = A_cols * B_cols * sizeof(float);
+        size_t C_size = A_rows * B_cols * sizeof(float);
+
+        float* A, * B, * C;
+        float* d_A, * d_B, * d_C;
+
+        A = (float*)malloc(A_size);
+        B = (float*)malloc(B_size);
+        C = (float*)malloc(C_size); // Allocate memory for matrices on host
+
+        // Initialize A and B with random values
+        srand(time(NULL));
+        for (int i = 0; i < A_rows * A_cols; ++i) {
+            A[i] = static_cast<float>(rand()) / RAND_MAX;
+        }
+        for (int i = 0; i < A_cols * B_cols; ++i) {
+            B[i] = static_cast<float>(rand()) / RAND_MAX;
+        }
+
+        // Allocate memory for matrices on device
+        cudaMalloc(&d_A, A_size);
+        cudaMalloc(&d_B, B_size);
+        cudaMalloc(&d_C, C_size);
+
+        // Copy matrices from host to device
+        cudaMemcpy(d_A, A, A_size, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_B, B, B_size, cudaMemcpyHostToDevice);
+
+        // Setup the execution configuration
+        dim3 dimBlock(16, 9); // Fixed tile dimensions
+        dim3 dimGrid((B_cols + dimBlock.x - 1) / dimBlock.x, (A_rows + dimBlock.y - 1) / dimBlock.y);
+
+        // Launch the kernel
+        tileMatrixMultAdaptive << <dimGrid, dimBlock >> > (d_C, d_A, d_B, A_rows, A_cols, B_cols);
+
+        // Copy result back to host
+        cudaMemcpy(C, d_C, C_size, cudaMemcpyDeviceToHost);
+
+        // Output for demonstration purposes
+        // Note: In a real application, you would likely perform verification or further processing on C
+
+        // Free device memory
+        cudaFree(d_A);
+        cudaFree(d_B);
+        cudaFree(d_C);
+
+        // Free host memory
+        free(A);
+        free(B);
+        free(C);
+    }
+
+    return 0;
+}
