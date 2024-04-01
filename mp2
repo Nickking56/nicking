@@ -110,11 +110,38 @@ int main() {
         cpuMatrixMul(cpuProd, mat1, mat2, dim);
 
         if (checkResults(cpuProd, gpuProd, dim)) {
-            std::cout << "TILE_WIDTH = " << tileSize << ": Test PASSED, GPU execution time: " << milliseconds << " ms" << std::endl;
+            //std::cout << "TILE_WIDTH = " << tileSize << ": Test PASSED, GPU execution time: " << milliseconds << " ms" << std::endl;
         }
         else {
-            std::cout << "TILE_WIDTH = " << tileSize << ": Test FAILED" << std::endl;
+            //std::cout << "TILE_WIDTH = " << tileSize << ": Test FAILED" << std::endl;
         }
+        cudaDeviceProp dp;
+        cudaGetDeviceProperties(&dp, 0);
+        printf("Threads That Can Be Simultaneously Scheduled = %d\n\n", dp.multiProcessorCount * dp.maxThreadsPerMultiProcessor);
+
+        // Question 2: Assuming you've chosen a TILE_WIDTH and have a corresponding specialized kernel
+        cudaFuncAttributes attr;
+        // Here, you'd need a specialized version of your kernel to query attributes, e.g., tileMatrixMult<10>
+        switch (tileSize) {
+        case 2:
+            cudaFuncGetAttributes(&attr, (void*)tileMatrixMult<2>); // This is how you'd theoretically call it for a specific specialization
+            break;
+        case 5:
+            cudaFuncGetAttributes(&attr, (void*)tileMatrixMult<5>); // This is how you'd theoretically call it for a specific specialization
+            break;
+        case 10:
+            cudaFuncGetAttributes(&attr, (void*)tileMatrixMult<10>); // This is how you'd theoretically call it for a specific specialization
+            break;
+        case 25:
+            cudaFuncGetAttributes(&attr, (void*)tileMatrixMult<25>); // This is how you'd theoretically call it for a specific specialization
+            break;
+        default:
+            printf("Unsupported TILE_WIDTH\n");
+        }
+        printf("Number of Registers = %d\n", attr.numRegs);
+        printf("Shared Memory Size = %d bytes\n", 2 * tileSize * tileSize * 4);
+        printf("Number of Blocks Per Streaming Multiprocessor = %d\n", dp.maxThreadsPerMultiProcessor / attr.maxThreadsPerBlock);
+        printf("Maximum Total Threads Simultaneously Scheduled/Executing = %d\n", dp.maxThreadsPerMultiProcessor);
 
         cudaFree(dMat1);
         cudaFree(dMat2);
